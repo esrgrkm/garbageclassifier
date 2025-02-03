@@ -1,0 +1,236 @@
+import os                       #os helps to work with file and directory paths
+import torch                    #torch is library for PyTorch and it is deep learning framework. creates deep learning models. like keras and tensorflow
+import torch.nn as nn           #contains neural network compenents. like layers.
+import torch.optim as optim     #optimization for training
+from torch.utils.data import DataLoader #for loading my dataset
+from torchvision import transforms, models      
+from torchvision.datasets import ImageFolder        #torch vision is for image processing and model building
+from sklearn.metrics import confusion_matrix, classification_report     #for create confusion matrix
+import matplotlib.pyplot as plt         #for creating the plotting graphs for the result
+import seaborn as sns                   #same for plotting
+import numpy as np                      # numpy is for working with arrays   
+from PIL import Image                   #for creating and opening my tested and labeled photo
+import cv2                              #for adding label on tested image
+
+# Dataset path is defined here
+dataset_path = r''  
+
+# Define transforms for the training and validation sets
+train_transforms = transforms.Compose([
+    transforms.RandomResizedCrop(150),      #randomly crops images to 150x150
+    transforms.RandomHorizontalFlip(),      #randomly flips images horizontally
+    transforms.ToTensor(),                  #conver images to pytorch tensors
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])  #normalizes pixel values to specific mean and sd
+])
+
+val_transforms = transforms.Compose([
+    transforms.Resize(150),         #resizes images to 150x150
+    transforms.CenterCrop(150),     #centrally crops images
+    transforms.ToTensor(),          #covvert images to pytorch tensors
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])  #normalizes the pixel values
+])
+
+# Loading the datasets
+#loads images from directories and assings them, assigns labels to corresponding subdirectory
+train_dataset = ImageFolder(root=os.path.join(dataset_path, 'train'), transform=train_transforms)
+val_dataset = ImageFolder(root=os.path.join(dataset_path, 'val'), transform=val_transforms)
+
+#loads the data in batches. Shuffle = true means data is randomly shuffled. validation is our reference point
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+# Define the model
+class SimpleCNN(nn.Module):                 #we define Convolutional Neural Network here
+    def __init__(self, num_classes):
+        super(SimpleCNN, self).__init__()
+        self.features = nn.Sequential(                      #features: we have 3 convolutional layers there. used max pooling to reduce spatial dimensions
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2, padding=0),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2, padding=0),
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2, padding=0),
+        )
+        self.classifier = nn.Sequential(            # classifier: flattens the image to 1d and passes it through fully connected layers to classify images into one class
+            nn.Flatten(),
+            nn.Linear(128 * 18 * 18, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
+        )
+    
+    def forward(self, x):               #forward method defined here. It works as how the input image will pass through the layers
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+num_classes = len(train_dataset.classes)          #determines number of classses based on the training dataset
+model = SimpleCNN(num_classes=num_classes)        #calls the cnn model
+
+# Set device to GPU if available. Bc pytorch uses gpu for that process. It checks if gpu is available. Better than CPU bc faster
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# Define loss function and optimizer
+criterion = nn.CrossEntropyLoss()               #cross-entropy loss is used for classification tasks
+optimizer = optim.Adam(model.parameters(), lr=0.0001)   #it optimizes the learning rate.
+
+# Training the model, it is a training loop actualy.
+num_epochs = 10                     #number of epochs is how many times model train, see, used entired dataset
+best_val_loss = float('inf')        #it tracks the lowest validation loss for early stopping
+early_stop_patience = 5             #if validation loss doesnt improve for 5 consecutive epochs, training will stop early
+early_stop_counter = 0
+
+train_losses = []               #shows the losses 
+val_losses = []
+
+for epoch in range(num_epochs):         #we are training there for each epoch value
+    model.train()
+    running_loss = 0.0
+    for inputs, labels in train_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        optimizer.zero_grad()                   #resets the gradients before every batch
+        outputs = model(inputs)                 #feeds the iamges through our model
+        loss = criterion(outputs, labels)       #calculates the gradients to track loss
+        loss.backward()
+        optimizer.step()                        #updates the model weight
+        running_loss += loss.item() * inputs.size(0)            #accumulates the loss for current epoc<h
+    
+    epoch_loss = running_loss / len(train_dataset)          #defines epoch loss in the end of the training loop
+    train_losses.append(epoch_loss)    
+    
+    model.eval()                            #sets the model to evalutaion mode
+    running_val_loss = 0.0
+    with torch.no_grad():               #we need to disable the gradient calculations during the validation bc we need to save the memory and computation
+        for inputs, labels in val_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            running_val_loss += loss.item() * inputs.size(0)
+    
+    epoch_val_loss = running_val_loss / len(val_dataset)    # we find the validation loss there
+    val_losses.append(epoch_val_loss)
+    
+    print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {epoch_val_loss:.4f}") #in there we are just write which epoch we are doing and what is the loss in the prompt
+    
+    #here for early stopping, if validation loss improves, model is saved, early stop counter is reset
+    #if validation loss doesnt improve, training is already stopped
+    if epoch_val_loss < best_val_loss:
+        best_val_loss = epoch_val_loss
+        torch.save(model.state_dict(), 'best_model.pth')
+        early_stop_counter = 0
+    else:
+        early_stop_counter += 1
+    
+    if early_stop_counter >= early_stop_patience:
+        print("Early stopping triggered")
+        break
+
+# Model Evaluation and Visualization  
+# Plots the training and validation loss over epochs to visualize how the model is learning.
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 2, 1)
+plt.plot(train_losses, label='Train Loss')
+plt.plot(val_losses, label='Val Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
+
+#Loads the best-performing model and sets it to evaluation mode.
+
+model.load_state_dict(torch.load('best_model.pth'))
+model.eval()
+
+
+# here is for creating confusion matrix and classification report
+all_preds = []
+all_labels = []
+
+with torch.no_grad():
+    for inputs, labels in val_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = model(inputs)
+        _, preds = torch.max(outputs, 1)
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+
+conf_matrix = confusion_matrix(all_labels, all_preds)   #confusion matrix shows us the predictions are matched with true labels or not
+plt.figure(figsize=(10, 8))
+sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=train_dataset.classes, yticklabels=train_dataset.classes)   #we need to use seaborn and heatmap the visualize confusion matrix
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.show()
+
+print(classification_report(all_labels, all_preds, target_names=train_dataset.classes))     
+
+# Function to classify an image and overlay the label
+# takes single image, process it and gives it to the trained model for classification.
+
+def classify_single_object(image_path, model, class_indices, device):
+    if not os.path.exists(image_path):
+        print(f"Error: Image file '{image_path}' does not exist.")
+        return None
+
+    try:
+        image = Image.open(image_path)
+    except IOError:
+        print(f"Error: Unable to read the image file '{image_path}'.")
+        return None
+
+    # Convert image and prepare for classification
+    transform = transforms.Compose([
+        transforms.Resize((150, 150)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    # Apply the transformations and classify the image
+    image_tensor = transform(image).unsqueeze(0).to(device)
+    model.eval()
+    with torch.no_grad():
+        output = model(image_tensor)
+        _, predicted_class = torch.max(output, 1)
+
+    # Get the predicted label
+    label_map = {v: k for k, v in class_indices.items()}
+    predicted_label = label_map.get(predicted_class.item(), 'unknown')
+
+    # Convert the image to numpy array to overlay text
+    image_np = np.array(image.convert('RGB'))
+
+    # Define the position and font for label text overlay (using OpenCV)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    position = (10, 30)  # Position for label (top-left corner)
+    font_scale = 1
+    font_color = (255, 0, 0)  # Blue color for text
+    thickness = 2
+
+    # Overlay the predicted label on the image using OpenCV
+    image_np = cv2.putText(image_np, predicted_label, position, font, font_scale, font_color, thickness, cv2.LINE_AA)
+
+    # Save the image with the label overlay
+    output_image_path = os.path.splitext(image_path)[0] + '_classified.jpg'
+    output_image = Image.fromarray(image_np)
+    output_image.save(output_image_path)
+
+    return predicted_label, output_image_path
+
+# Example usage: classifies an image and displays the result. thats the end part. It prints the result, result of prediction
+test_image_path = r''  # Replace with the path to your test image
+predicted_label, output_image_path = classify_single_object(test_image_path, model, train_dataset.class_to_idx, device)
+
+if predicted_label:
+    print(f'Predicted Label for {test_image_path}: {predicted_label}')
+if output_image_path:
+    print(f'Classified image saved to {output_image_path}')
+
+    # Display the classified image
+    classified_image = Image.open(output_image_path)
+    plt.figure(figsize=(10, 10))
+    plt.imshow(classified_image)
+    plt.axis('off')
+    plt.show()
